@@ -1,0 +1,11 @@
+.idea/
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.pytest_tmp/
+.env
+data/*.db
+data/*.db-*
+data/index.json
+.docx_render/

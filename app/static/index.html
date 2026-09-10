@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>星河智能 · 企业制度 AI 助手</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <div class="ambient ambient-one"></div>
+  <div class="ambient ambient-two"></div>
+
+  <section id="loginView" class="login-shell">
+    <div class="brand-block">
+      <div class="logo">星</div>
+      <div>
+        <p class="eyebrow">XINGHE INTELLIGENCE</p>
+        <h1>企业制度 AI 助手</h1>
+        <p class="subtitle">让制度可检索、流程可执行、权限可控制、行为可审计。</p>
+      </div>
+    </div>
+    <form id="loginForm" class="login-card">
+      <div class="card-label">内部身份认证</div>
+      <h2>欢迎回来</h2>
+      <label>账号<input id="username" autocomplete="username" value="employee" required></label>
+      <label>密码<input id="password" type="password" autocomplete="current-password" required></label>
+      <p id="loginError" class="error"></p>
+      <button class="primary full" type="submit">安全登录</button>
+      <div class="demo-users">
+        <span>演示身份（仅填账号）</span>
+        <button type="button" data-user="employee">员工</button>
+        <button type="button" data-user="hr">HR</button>
+        <button type="button" data-user="auditor">审计</button>
+        <button type="button" data-user="admin">管理员</button>
+      </div>
+      <p class="security-note">演示环境账号，密码见项目 README。生产部署请接入企业 SSO，并更换会话密钥。</p>
+    </form>
+  </section>
+
+  <main id="appView" class="app-shell hidden">
+    <aside class="sidebar">
+      <div class="side-brand"><div class="logo small">星</div><strong>制度智库</strong></div>
+      <nav>
+        <button class="nav-item active" data-panel="chatPanel"><span>✦</span> 智能问答</button>
+        <button class="nav-item" data-panel="workbenchPanel"><span>▦</span> 工作台</button>
+        <button id="auditNav" class="nav-item hidden" data-panel="auditPanel"><span>◎</span> 审计中心</button>
+      </nav>
+      <div class="capability-card">
+        <p>企业能力</p>
+        <div class="tags"><span>RAG</span><span>Agent</span><span>RBAC</span><span>Audit</span><span>Human</span></div>
+      </div>
+      <div class="user-card">
+        <div id="avatar" class="avatar">员</div>
+        <div><strong id="displayName">普通员工</strong><small id="roleText">员工 · 产品部</small></div>
+        <button id="logoutBtn" title="退出">↗</button>
+      </div>
+    </aside>
+
+    <section class="content">
+      <header class="topbar">
+        <div><p class="eyebrow">EMPLOYEE HANDBOOK</p><h2 id="panelTitle">智能问答</h2></div>
+        <div class="status"><i></i> 知识库在线 <span id="kbStatus">检查中</span></div>
+      </header>
+
+      <section id="chatPanel" class="panel chat-layout">
+        <div id="messages" class="messages">
+          <div class="message assistant welcome">
+            <div class="message-icon">AI</div>
+            <div class="bubble">
+              <p class="message-meta">企业制度助手</p>
+              <h3>你好，我可以帮你查制度、算年假、提交请假或转接 HR。</h3>
+              <p>回答会附带《员工守则》原文依据；涉及争议或依据不足时，我会启动人工兜底。</p>
+            </div>
+          </div>
+        </div>
+        <div class="composer-wrap">
+          <div class="quick-prompts">
+            <button>工作满 8 年有几天年假？</button>
+            <button>迟到超过 30 分钟如何处理？</button>
+            <button>我要申请请假 2026-08-10 到 2026-08-12</button>
+            <button>帮我转人工咨询</button>
+          </div>
+          <form id="chatForm" class="composer">
+            <textarea id="messageInput" rows="1" maxlength="2000" placeholder="输入制度问题或需要办理的事项…" required></textarea>
+            <button id="sendBtn" class="send" type="submit">发送 ↑</button>
+          </form>
+          <p class="disclaimer">AI 回答用于内部制度查询，不替代劳动合同、正式通知或法律意见。</p>
+        </div>
+      </section>
+
+      <section id="workbenchPanel" class="panel hidden">
+        <div class="panel-heading"><div><h3>业务工作台</h3><p>基于当前角色展示可访问的数据与人工任务。</p></div><button id="refreshWorkbench" class="secondary">刷新</button></div>
+        <div class="metric-grid">
+          <div class="metric"><span>我的身份</span><strong id="metricRole">-</strong><small>RBAC 最小权限</small></div>
+          <div class="metric"><span>可用工具</span><strong id="metricTools">-</strong><small>按角色动态授权</small></div>
+          <div class="metric"><span>模型模式</span><strong id="metricModel">-</strong><small>本地检索 / LLM 增强</small></div>
+        </div>
+        <div class="data-grid">
+          <article class="data-card"><div class="data-title"><h4>人力工单</h4><span>可跟踪</span></div><div id="ticketsList" class="list-state">加载中…</div></article>
+          <article id="humanCasesCard" class="data-card hidden"><div class="data-title"><h4>人工兜底队列</h4><span class="warning">待处理</span></div><div id="humanCasesList" class="list-state"></div></article>
+          <article id="leaveCard" class="data-card hidden"><div class="data-title"><h4>请假人工审批</h4><span>Human-in-the-loop</span></div><div id="leaveList" class="list-state"></div></article>
+          <article id="adminCard" class="data-card hidden"><div class="data-title"><h4>知识库管理</h4><span>管理员</span></div><p>员工守则发生更新后，可重新解析文档并生成索引。</p><button id="reindexBtn" class="primary">重建知识库索引</button><p id="reindexResult" class="muted"></p></article>
+        </div>
+      </section>
+
+      <section id="auditPanel" class="panel hidden">
+        <div class="panel-heading"><div><h3>日志审计中心</h3><p>关键事件脱敏记录，哈希链用于检测历史日志篡改。</p></div><button id="refreshAudit" class="secondary">刷新日志</button></div>
+        <div id="chainBanner" class="chain-banner">正在验证审计链…</div>
+        <div class="table-wrap"><table><thead><tr><th>时间</th><th>用户</th><th>动作</th><th>资源</th><th>结果</th></tr></thead><tbody id="auditBody"></tbody></table></div>
+      </section>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
+
