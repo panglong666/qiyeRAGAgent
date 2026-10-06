@@ -20,6 +20,18 @@ from app.tools import ToolContext, ToolRegistry
 UNKNOWN_ANSWER = "我不知道，知识库中没有相关内容。"
 GraphRoute = Literal["answer", "unknown", "tool"]
 
+# 业务操作意图判别。中文里"申请/创建/提交"既可能是动作，也可能只是话题的一部分：
+# 「请假申请流程是什么」问的是流程，「创建工单要走什么审批」问的是审批规则，
+# 两句都不该落库写数据。因此凡命中疑问词且没有明确动作词时，一律按"咨询"处理，
+# 交给检索回答问题；只有出现明确动作词才真正执行业务操作。
+# 原则：误答只是不精确，误操作会产生副作用，所以咨询优先于操作。
+CONSULT_HINTS = (
+    "流程", "步骤", "怎么", "如何", "是什么", "什么是", "什么意思", "什么含义",
+    "规定", "要求是什么", "需要什么", "要走什么", "什么审批", "哪些条件", "什么条件",
+    "能不能", "可以吗", "是否", "有没有",
+)
+ACTION_HINTS = ("我要", "我想", "帮我", "请帮", "麻烦", "替我", "给我")
+
 
 class AgentState(TypedDict, total=False):
     """LangGraph 在各节点间传递的企业 Agent 状态。"""
@@ -318,6 +330,11 @@ class EnterpriseAgent:
         if any(keyword in message for keyword in ("我的工单", "工单进度", "查看工单")):
             return "get_my_tickets", {}, "查询本人已创建的人力工单"
 
+        # 咨询优先：以下两条规则会写库，判定前先排除"只是在问制度/问流程"的疑问句。
+        # 只读查询（工单进度、年假计算）不受影响，误触发也没有副作用。
+        if self._is_consultation(message):
+            return None
+
         if "工单" in message and any(keyword in message for keyword in ("创建", "提交", "新建")):
             return (
                 "create_hr_ticket",
@@ -352,6 +369,17 @@ class EnterpriseAgent:
                     "识别工作年限并调用年假计算工具",
                 )
         return None
+
+    @staticmethod
+    def _is_consultation(message: str) -> bool:
+        """判断是否是"问制度/问流程"而非"要办业务"。
+
+        返回 True 表示应放弃业务操作、交给知识检索回答。
+        只要出现明确动作词（我要/帮我/麻烦…）就认定为操作意图，不受疑问词影响。
+        """
+        if any(hint in message for hint in ACTION_HINTS):
+            return False
+        return any(hint in message for hint in CONSULT_HINTS)
 
     def _audit_graph_node(self, state: AgentState, node: str, detail: dict[str, Any]) -> None:
         self.audit.log(

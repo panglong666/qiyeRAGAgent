@@ -52,13 +52,31 @@ async def lifespan(_: FastAPI):
     yield
 
 
+# 前端资源统一缓存策略：每次回源校验，文件没变仍返回 304，不损失性能。
+NO_CACHE_HEADER = "no-cache, must-revalidate"
+
+
+class NoCacheStaticFiles(StaticFiles):
+    """静态资源强制回源校验。
+
+    Starlette 的 StaticFiles 只发 ETag / Last-Modified，不发 Cache-Control，
+    浏览器会走启发式缓存，出现"改了前端文件、刷新却没变化"的假象。
+    这里补上 Cache-Control，让普通 F5 也能拿到最新文件。
+    """
+
+    def file_response(self, *args, **kwargs) -> Response:
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = NO_CACHE_HEADER
+        return response
+
+
 app = FastAPI(
     title=settings.app_name,
     version="1.0.0",
     description="基于员工守则的企业级 RAG + Agent 内部助手",
     lifespan=lifespan,
 )
-app.mount("/static", StaticFiles(directory=PROJECT_ROOT / "app" / "static"), name="static")
+app.mount("/static", NoCacheStaticFiles(directory=PROJECT_ROOT / "app" / "static"), name="static")
 
 
 def client_ip(request: Request) -> str:
@@ -84,7 +102,11 @@ def current_principal(
 
 @app.get("/", include_in_schema=False)
 def home() -> FileResponse:
-    return FileResponse(PROJECT_ROOT / "app" / "static" / "index.html")
+    # 首页同样不能被浏览器缓存住，否则连 styles.css 的版本切换都测不出来
+    return FileResponse(
+        PROJECT_ROOT / "app" / "static" / "index.html",
+        headers={"Cache-Control": NO_CACHE_HEADER},
+    )
 
 
 @app.get("/api/health")
@@ -148,14 +170,16 @@ def list_tickets(principal: Principal = Depends(current_principal)) -> list[dict
     if "ticket.read_all" in permissions_for(principal.role):
         rows = database.fetch_all(
             """
-            SELECT t.id, u.display_name creator, t.category, t.subject, t.status, t.created_at
+            SELECT t.id, u.display_name creator, t.category, t.subject, t.description,
+                   t.status, t.created_at
             FROM hr_tickets t JOIN users u ON u.id=t.creator_id ORDER BY t.id DESC LIMIT 100
             """
         )
     else:
         ensure_permission(principal, "ticket.read_own")
         rows = database.fetch_all(
-            "SELECT id, category, subject, status, created_at FROM hr_tickets WHERE creator_id=? ORDER BY id DESC",
+            "SELECT id, category, subject, description, status, created_at FROM hr_tickets "
+            "WHERE creator_id=? ORDER BY id DESC",
             (principal.user_id,),
         )
     return [dict(row) for row in rows]
@@ -167,8 +191,10 @@ def list_human_cases(principal: Principal = Depends(current_principal)) -> list[
     rows = database.fetch_all(
         """
         SELECT c.id, u.display_name creator, c.question, c.reason, c.status,
-               c.resolution, c.created_at, c.resolved_at
-        FROM human_cases c JOIN users u ON u.id=c.creator_id
+               c.resolution, c.created_at, c.resolved_at, v.display_name resolver
+        FROM human_cases c
+        JOIN users u ON u.id=c.creator_id
+        LEFT JOIN users v ON v.id=c.resolver_id
         ORDER BY CASE c.status WHEN 'pending' THEN 0 ELSE 1 END, c.id DESC
         LIMIT 100
         """
@@ -202,16 +228,27 @@ def resolve_human_case(
     return {"id": case_id, "status": "resolved"}
 
 
+LEAVE_VOUCHER_SELECT = """
+        SELECT r.id, u.display_name creator, r.leave_type, r.start_date, r.end_date,
+               r.reason, r.status, r.created_at,
+               v.display_name reviewer, r.review_note, r.reviewed_at
+        FROM leave_requests r
+        JOIN users u ON u.id=r.creator_id
+        LEFT JOIN users v ON v.id=r.reviewer_id
+"""
+
+
 @app.get("/api/leave-requests")
 def list_leave_requests(principal: Principal = Depends(current_principal)) -> list[dict[str, object]]:
-    ensure_permission(principal, "leave.review")
-    rows = database.fetch_all(
-        """
-        SELECT r.id, u.display_name creator, r.leave_type, r.start_date, r.end_date,
-               r.reason, r.status, r.created_at
-        FROM leave_requests r JOIN users u ON u.id=r.creator_id ORDER BY r.id DESC LIMIT 100
-        """
-    )
+    """审批人看到整条队列；普通员工看到自己的申请与审批凭证（闭环的最后一环）。"""
+    if "leave.review" in permissions_for(principal.role):
+        rows = database.fetch_all(f"{LEAVE_VOUCHER_SELECT} ORDER BY r.id DESC LIMIT 100")
+    else:
+        ensure_permission(principal, "leave.request")
+        rows = database.fetch_all(
+            f"{LEAVE_VOUCHER_SELECT} WHERE r.creator_id=? ORDER BY r.id DESC LIMIT 100",
+            (principal.user_id,),
+        )
     return [dict(row) for row in rows]
 
 
@@ -228,7 +265,17 @@ def review_leave_request(
         raise HTTPException(status_code=404, detail="请假申请不存在")
     if existing["status"] != "pending_human_approval":
         raise HTTPException(status_code=409, detail="该申请已处理")
-    database.execute("UPDATE leave_requests SET status=? WHERE id=?", (payload.decision, request_id))
+    # 审批留痕：状态、审批人、审批时间、审批意见一并落库。
+    # 之前只改 status，审批人/时间/意见只进审计日志 —— 业务表出不了凭证。
+    database.execute(
+        """
+        UPDATE leave_requests
+        SET status=?, reviewer_id=?, review_note=?, reviewed_at=?
+        WHERE id=?
+        """,
+        (payload.decision, principal.user_id, payload.note,
+         datetime.now(UTC).isoformat(), request_id),
+    )
     audit.log(
         principal, "leave.review", f"leave_request:{request_id}", payload.decision,
         {"note": payload.note}, client_ip(request),

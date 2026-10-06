@@ -31,7 +31,12 @@ function showApp(user) {
   $("#metricTools").textContent = user.tools.length;
   $("#auditNav").classList.toggle("hidden", !user.permissions.includes("audit.read"));
   $("#humanCasesCard").classList.toggle("hidden", !user.permissions.includes("human_case.manage"));
-  $("#leaveCard").classList.toggle("hidden", !user.permissions.includes("leave.review"));
+  const canReviewLeave = user.permissions.includes("leave.review");
+  const canRequestLeave = user.permissions.includes("leave.request");
+  // 审批人看整条队列；申请人看自己的申请与审批凭证（闭环最后一环）。
+  $("#leaveCard").classList.toggle("hidden", !(canReviewLeave || canRequestLeave));
+  $("#leaveCardTitle").textContent = canReviewLeave ? "请假人工审批" : "我的请假申请";
+  $("#leaveCardTag").textContent = canReviewLeave ? "Human-in-the-loop" : "申请凭证";
   $("#adminCard").classList.toggle("hidden", !user.permissions.includes("kb.manage"));
   loadHealth();
 }
@@ -109,7 +114,7 @@ function addMessage(role, text, data = {}) {
   wrapper.innerHTML = `
     <div class="message-icon">${role === "user" ? "我" : "AI"}</div>
     <div class="bubble"><p class="message-meta">${role === "user" ? escapeHtml(currentUser?.display_name || "用户") : "企业制度助手"}</p>
-      <div>${escapeHtml(text)}</div>
+      <div class="bubble-body">${escapeHtml(text)}</div>
       ${citations ? `<div class="citations">${citations}</div>` : ""}
       ${data.escalated ? `<span class="escalated">已启动人工兜底</span>` : ""}
       ${trace ? `<details class="trace"><summary>查看 Agent 执行轨迹</summary><ol>${trace}</ol></details>` : ""}
@@ -131,18 +136,36 @@ async function loadWorkbench() {
   await loadHealth();
   try {
     const tickets = await api("/api/tickets");
-    renderList("#ticketsList", tickets, (item) => `<strong>#${item.id} ${escapeHtml(item.subject)}</strong><small>${escapeHtml(item.status)} · ${formatTime(item.created_at)}</small>`);
+    renderList("#ticketsList", tickets, (item) => record(
+      item.id,
+      item.subject,
+      item.status,
+      detailRow("提交人", item.creator)
+        + detailRow("分类", item.category)
+        + detailRow("内容", item.description)
+        + detailRow("提交时间", formatTime(item.created_at)),
+    ));
   } catch (error) { $("#ticketsList").textContent = error.message; }
   if (currentUser.permissions.includes("human_case.manage")) loadHumanCases();
-  if (currentUser.permissions.includes("leave.review")) loadLeaveRequests();
+  if (currentUser.permissions.includes("leave.review")
+    || currentUser.permissions.includes("leave.request")) loadLeaveRequests();
 }
 
 async function loadHumanCases() {
   const items = await api("/api/human-cases");
-  renderList("#humanCasesList", items, (item) => `
-    <strong>#${item.id} ${escapeHtml(item.creator)} · ${escapeHtml(item.reason)}</strong>
-    <small>${escapeHtml(item.question)} · ${escapeHtml(item.status)}</small>
-    ${item.status === "pending" ? `<div class="list-actions"><button onclick="resolveCase(${item.id})">填写处理结果</button></div>` : ""}`);
+  renderList("#humanCasesList", items, (item) => record(
+    item.id,
+    `${item.creator} · ${item.reason}`,
+    item.status,
+    detailRow("问题", item.question)
+      + detailRow("提交时间", formatTime(item.created_at))
+      + detailRow("处理人", item.resolver)
+      + detailRow("处理时间", formatTime(item.resolved_at))
+      + detailRow("处理结果", item.resolution),
+    item.status === "pending"
+      ? `<div class="list-actions"><button onclick="resolveCase(${item.id})">填写处理结果</button></div>`
+      : "",
+  ));
 }
 
 async function resolveCase(id) {
@@ -155,10 +178,29 @@ window.resolveCase = resolveCase;
 
 async function loadLeaveRequests() {
   const items = await api("/api/leave-requests");
-  renderList("#leaveList", items, (item) => `
-    <strong>#${item.id} ${escapeHtml(item.creator)} · ${escapeHtml(item.leave_type)}</strong>
-    <small>${escapeHtml(item.start_date)} 至 ${escapeHtml(item.end_date)} · ${escapeHtml(item.status)}</small>
-    ${item.status === "pending_human_approval" ? `<div class="list-actions"><button onclick="reviewLeave(${item.id}, 'approved')">批准</button><button onclick="reviewLeave(${item.id}, 'rejected')">拒绝</button></div>` : ""}`);
+  renderList("#leaveList", items, (item) => record(
+    item.id,
+    `${item.creator} · ${item.leave_type}`,
+    item.status,
+    detailRow("起止日期", `${item.start_date} 至 ${item.end_date}`)
+      + detailRow("事由", item.reason)
+      + detailRow("提交时间", formatTime(item.created_at))
+      + detailRow("审批人", item.reviewer)
+      + detailRow("审批时间", formatTime(item.reviewed_at))
+      + detailRow("审批意见", item.review_note),
+    item.status === "pending_human_approval"
+      ? leaveActions(item)
+      : "",
+  ));
+}
+
+// 审批按钮只给有审批权的人渲染：申请人看自己的单时不该出现"批准/拒绝"。
+function leaveActions(item) {
+  if (item.status !== "pending_human_approval") return "";
+  if (!currentUser || !currentUser.permissions.includes("leave.review")) return "";
+  return `<div class="list-actions">`
+    + `<button onclick="reviewLeave(${item.id}, 'approved')">批准</button>`
+    + `<button onclick="reviewLeave(${item.id}, 'rejected')">拒绝</button></div>`;
 }
 
 async function reviewLeave(id, decision) {
@@ -167,6 +209,26 @@ async function reviewLeave(id, decision) {
   loadLeaveRequests();
 }
 window.reviewLeave = reviewLeave;
+
+const STATUS_LABELS = {
+  open: "待处理", pending: "待处理", pending_human_approval: "待人工审批",
+  approved: "已批准", rejected: "已拒绝", resolved: "已处理",
+};
+
+function statusLabel(status) { return STATUS_LABELS[status] || status; }
+
+function detailRow(label, value) {
+  return value ? `<dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd>` : "";
+}
+
+// 列表项统一渲染成可展开记录：摘要一行，点开看完整字段（含审批凭证）。
+function record(id, title, status, rows, actions = "") {
+  return `<details class="record">
+      <summary><strong>#${id} ${escapeHtml(title)}</strong><span class="status-chip">${escapeHtml(statusLabel(status))}</span></summary>
+      <dl class="record-fields">${rows}</dl>
+      ${actions}
+    </details>`;
+}
 
 function renderList(selector, items, renderer) {
   $(selector).innerHTML = items.length ? items.map((item) => `<div class="list-item">${renderer(item)}</div>`).join("") : "暂无数据";

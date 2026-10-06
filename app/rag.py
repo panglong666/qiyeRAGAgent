@@ -58,7 +58,12 @@ class SearchHit:
 
 
 def tokenize(text: str) -> list[str]:
-    """LangChain BM25 使用的中文分词函数，无需下载额外嵌入模型。"""
+    """LangChain BM25 使用的中文分词函数，无需下载额外嵌入模型。
+
+    只产出 2-gram：3-gram 跨越词边界的比例更高（"公司的竞争对手"会切出
+    "司的竞""的竞争"），这类碎片在语料里偶合出现时会变成"伪证据"，
+    既稀释覆盖率，也会把域外问题误判成有依据。长词的信息由 2-gram 组合覆盖。
+    """
     text = text.lower()
     tokens = re.findall(r"[a-z0-9_.-]+|[\u4e00-\u9fff]+", text)
     result: list[str] = []
@@ -68,7 +73,6 @@ def tokenize(text: str) -> list[str]:
                 result.append(token)
             else:
                 result.extend(token[index:index + 2] for index in range(len(token) - 1))
-                result.extend(token[index:index + 3] for index in range(len(token) - 2))
         else:
             result.append(token)
     return result
@@ -87,6 +91,8 @@ class KnowledgeBase:
         top_k: int = 4,
         min_score: float = 0.08,
         min_coverage: float = 0.20,
+        max_df_ratio: float = 0.5,
+        min_substantive_tokens: int = 2,
         chunk_size: int = 800,
         chunk_overlap: int = 120,
     ):
@@ -95,10 +101,14 @@ class KnowledgeBase:
         self.top_k = top_k
         self.min_score = min_score
         self.min_coverage = min_coverage
+        self.max_df_ratio = max_df_ratio
+        self.min_substantive_tokens = min_substantive_tokens
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
         self.document_hash = ""
         self.documents: list[Document] = []
+        self._corpus_vocab: set[str] = set()
+        self._corpus_stopwords: set[str] = set()
         self.retriever: BM25Retriever | None = None
         self.retrieval_chain: RunnableSerializable[str, list[SearchHit]] | None = None
 
@@ -211,6 +221,22 @@ class KnowledgeBase:
     def _build_retrieval_chain(self) -> None:
         if not self.documents:
             raise ValueError("知识库没有可检索文档")
+        # 语料词表 + 语料级通用词：
+        #   词表用于把 2/3-gram 切出的"跨词碎片"排除在依据之外；
+        #   通用词（如"公司""员工"，df/N 超过一半）几乎每块都有，不携带
+        #   主题信息，不能作为"这个问题属于知识库范围"的证据。
+        vocab: set[str] = set()
+        document_tokens = [self._document_tokens(document) for document in self.documents]
+        for tokens in document_tokens:
+            vocab |= tokens
+        frequency: dict[str, int] = {}
+        for tokens in document_tokens:
+            for token in tokens:
+                frequency[token] = frequency.get(token, 0) + 1
+        self._corpus_vocab = vocab
+        self._corpus_stopwords = {
+            token for token, count in frequency.items() if count / len(document_tokens) > self.max_df_ratio
+        }
         self.retriever = BM25Retriever.from_documents(
             self.documents,
             preprocess_func=tokenize,
@@ -218,6 +244,15 @@ class KnowledgeBase:
         )
         # LCEL 检索链把 LangChain Retriever 与可解释的评分步骤组合起来。
         self.retrieval_chain = RunnableLambda(self._retrieve_documents) | RunnableLambda(self._score_documents)
+
+    @staticmethod
+    def _document_tokens(document: Document) -> set[str]:
+        """知识块的全部可检索词（正文 + 章节标题），标题也参与匹配以便定位章节。"""
+        return set(tokenize(document.page_content + " " + str(document.metadata.get("section", ""))))
+
+    def _substantive_tokens(self, query_tokens: set[str]) -> set[str]:
+        """查询中的"实质词"：既要在语料里出现，又不能是语料级通用词。"""
+        return (query_tokens & self._corpus_vocab) - self._corpus_stopwords
 
     def _retrieve_documents(self, query: str) -> dict[str, Any]:
         if self.retriever is None:
@@ -232,6 +267,21 @@ class KnowledgeBase:
         unique_query_tokens = set(query_tokens)
         if not unique_query_tokens:
             return []
+
+        # 依据覆盖率只统计「实质词」，解决两个相反方向的问题：
+        #   1) 2/3-gram 切出的跨词碎片（"什么规""班有什"）永远不可能命中，
+        #      留在分母里会把手册原词直问（"加班有什么规定"）稀释成"依据不足"；
+        #   2) 通用词（"公司"）几乎每块都命中，会凭一个不相关词就把
+        #      域外问题（"公司股票代码是多少"）误判成"有依据"。
+        substantive = self._substantive_tokens(unique_query_tokens)
+        if len(substantive) < self.min_substantive_tokens:
+            # 实质词不足以定位依据。保留候选是为了让阈值成为唯一的过滤环节
+            # （便于观测与测试），但分数与覆盖率置 0，统一由双阈值过滤。
+            return [
+                SearchHit(document=document, score=0.0, coverage=0.0)
+                for document in payload["documents"]
+            ]
+
         raw_scores = self.retriever.vectorizer.get_scores(query_tokens)
         score_by_chunk = {
             str(document.metadata["chunk_id"]): float(score)
@@ -239,8 +289,8 @@ class KnowledgeBase:
         }
         hits: list[SearchHit] = []
         for document in payload["documents"]:
-            document_tokens = set(tokenize(document.page_content + " " + str(document.metadata.get("section", ""))))
-            coverage = len(unique_query_tokens & document_tokens) / len(unique_query_tokens)
+            document_tokens = self._document_tokens(document)
+            coverage = len(substantive & document_tokens) / len(substantive)
             raw_score = score_by_chunk.get(str(document.metadata.get("chunk_id")), 0.0)
             normalized = raw_score / max(math.sqrt(len(unique_query_tokens)), 1.0) * coverage
             hits.append(SearchHit(document=document, score=normalized, coverage=coverage))

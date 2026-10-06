@@ -33,6 +33,11 @@ class Settings(BaseSettings):
     rag_top_k: int = 4
     rag_min_score: float = 0.08
     rag_min_coverage: float = 0.20
+    # 语料级通用词判定：df/N 超过该比例的词几乎每块都有（如"公司""员工"），
+    # 不携带主题信息，不能作为"问题属于知识库范围"的证据。
+    rag_max_df_ratio: float = 0.5
+    # 至少要几个"实质词"（在语料中出现、且不是通用词）才认为有依据可查。
+    rag_min_substantive_tokens: int = 2
     rag_chunk_size: int = 800
     rag_chunk_overlap: int = 120
 

@@ -59,7 +59,11 @@ CREATE TABLE IF NOT EXISTS leave_requests (
     reason TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'pending_human_approval',
     created_at TEXT NOT NULL,
-    FOREIGN KEY (creator_id) REFERENCES users(id)
+    reviewer_id INTEGER,
+    review_note TEXT NOT NULL DEFAULT '',
+    reviewed_at TEXT,
+    FOREIGN KEY (creator_id) REFERENCES users(id),
+    FOREIGN KEY (reviewer_id) REFERENCES users(id)
 );
 
 CREATE TABLE IF NOT EXISTS human_cases (
@@ -76,6 +80,14 @@ CREATE TABLE IF NOT EXISTS human_cases (
     FOREIGN KEY (resolver_id) REFERENCES users(id)
 );
 """
+
+# 请假审批凭证字段。老库不会因 CREATE TABLE IF NOT EXISTS 而自动补列，
+# 所以在 initialize() 里做一次幂等迁移，避免升级后请假列表接口直接报错。
+LEAVE_VOUCHER_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("reviewer_id", "INTEGER"),
+    ("review_note", "TEXT NOT NULL DEFAULT ''"),
+    ("reviewed_at", "TEXT"),
+)
 
 
 class Database:
@@ -96,7 +108,16 @@ class Database:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as connection:
             connection.executescript(SCHEMA)
+            self._migrate_leave_voucher(connection)
         self._seed_demo_users()
+
+    @staticmethod
+    def _migrate_leave_voucher(connection: sqlite3.Connection) -> None:
+        """为历史库补齐请假审批凭证列（新库建表时已包含，这里是幂等兜底）。"""
+        existing = {row["name"] for row in connection.execute("PRAGMA table_info(leave_requests)")}
+        for name, ddl in LEAVE_VOUCHER_COLUMNS:
+            if name not in existing:
+                connection.execute(f"ALTER TABLE leave_requests ADD COLUMN {name} {ddl}")
 
     def _seed_demo_users(self) -> None:
         """仅为本地演示初始化账号；生产环境应对接企业 SSO/LDAP。"""

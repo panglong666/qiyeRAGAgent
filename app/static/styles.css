@@ -72,8 +72,11 @@ nav { display: grid; gap: 7px; }
 .message.user { flex-direction: row-reverse; }
 .message-icon { width: 34px; height: 34px; border-radius: 11px; background: var(--green); color: var(--lime); display: grid; place-items: center; flex: 0 0 auto; font-size: 11px; font-weight: 800; }
 .message.user .message-icon { background: #dbe5df; color: var(--green); }
-.bubble { max-width: min(760px, 88%); background: white; border: 1px solid var(--line); border-radius: 5px 18px 18px 18px; padding: 17px 19px; box-shadow: 0 8px 24px rgba(32,61,50,.05); white-space: pre-wrap; }
+.bubble { max-width: min(760px, 88%); background: white; border: 1px solid var(--line); border-radius: 5px 18px 18px 18px; padding: 17px 19px; box-shadow: 0 8px 24px rgba(32,61,50,.05); }
 .message.user .bubble { background: var(--green); color: white; border: 0; border-radius: 18px 5px 18px 18px; }
+/* 换行只在正文元素上保留：气泡容器一旦用 pre-wrap，会把 addMessage 模板里的
+   缩进与空行渲染成真实空行，一句话的消息框也会被撑高上百像素。 */
+.bubble-body { white-space: pre-wrap; }
 .bubble p { margin: 0; }
 .bubble h3 { margin: 6px 0 8px; font-size: 18px; }
 .message-meta { font-size: 10px; color: var(--green-2); font-weight: 800; letter-spacing: .08em; }
@@ -108,6 +111,18 @@ details.trace li { margin: 3px 0; }
 .list-item:last-child { border: 0; }
 .list-item strong, .list-item small { display: block; }
 .list-item small { color: #87918d; }
+/* 可展开记录：摘要一行，点开看完整字段（含审批凭证）。cursor 必须给，
+   否则用户看不出能点，会误以为卡片坏了。 */
+.record summary { display: flex; align-items: center; gap: 8px; cursor: pointer; list-style: none; }
+.record summary::-webkit-details-marker { display: none; }
+.record summary::before { content: "▸"; flex: 0 0 auto; color: var(--green-2); font-size: 10px; }
+.record[open] summary::before { content: "▾"; }
+.record summary strong { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.record summary:hover strong { color: var(--green-2); }
+.status-chip { flex: 0 0 auto; color: var(--green); background: var(--warm); padding: 3px 7px; border-radius: 5px; font-size: 10px; }
+.record-fields { display: grid; grid-template-columns: auto 1fr; gap: 5px 10px; margin: 9px 0 0; font-size: 12px; }
+.record-fields dt { color: var(--muted); white-space: nowrap; }
+.record-fields dd { margin: 0; color: #3c4a45; word-break: break-word; }
 .list-actions { margin-top: 7px; display: flex; gap: 6px; }
 .list-actions button { border: 0; padding: 4px 8px; border-radius: 6px; color: var(--green); background: var(--warm); font-size: 11px; }
 .muted { color: var(--muted); font-size: 12px; }
